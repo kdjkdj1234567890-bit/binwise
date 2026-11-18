@@ -15,7 +15,7 @@ Photo in, correct bin out — on-device, no upload.
 ## What it does
 
 Binwise is a browser app that looks at what you are about to throw away and tells you how to
-prepare it for disposal. One photo runs a zero-shot CLIP classifier over a catalogue of 23
+prepare it for disposal. One photo runs a zero-shot CLIP classifier over a catalogue of 22
 common household items — PET bottles, coated paper cups, styrofoam trays, greasy pizza boxes,
 batteries, dead cables, ceramics and so on — entirely on the device. The winning item is then
 looked up in a **rules file** (`rules/kr.json`) that carries the disposal stream, the ordered
@@ -58,9 +58,10 @@ claimed yet; this build is the instrument for collecting them.
   `Xenova/clip-vit-base-patch32` at q8, on WebGPU with an automatic WASM fallback. Zero-shot was
   chosen deliberately: adding a new packaging type means adding a prompt, not labelling a
   dataset, which matters for a tool that has to track packaging that changes every season.
-- **Aggregation:** the model scores ~60 prompts; prompts are grouped per item and the best
-  prompt per item is kept, so "a clear plastic water bottle" and "an empty PET soda bottle" vote
-  for the same item instead of competing.
+- **Aggregation:** the model scores 82 prompts; an item's score is the summed probability of
+  its own prompts, so "a clear plastic water bottle" and "an empty PET soda bottle" add up for
+  the same item instead of competing, and an item that describes itself in four ways is not
+  penalised against one that has three.
 - **Decision layer:** a confidence floor plus a top-2 margin, both tuned on real photos, and a
   manual grid generated from the same rules file so the tool is still usable when the model is
   wrong or the photo is bad.
@@ -85,7 +86,7 @@ claimed yet; this build is the instrument for collecting them.
 ## What we learned
 
 Recycling guidance is a *rules problem wearing an ML costume*. The classifier only has to
-narrow 23 items down to one; everything the user needs — rinse, remove the cap, flatten, do not
+narrow 22 items down to one; everything the user needs — rinse, remove the cap, flatten, do not
 put this in paper — is in the rules layer. That split is what makes the tool portable to other
 districts and other countries.
 

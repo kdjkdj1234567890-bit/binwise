@@ -8,6 +8,13 @@ account, no API key and no upload: the image is classified on the device with a 
 CLIP model running through WebGPU or WebAssembly.
 
 Live demo: <https://kdjkdj1234567890-bit.github.io/binwise/>
+Demo video (2:49): <https://youtu.be/T8rJFknAgV8>
+
+![A PET bottle gets a recycling verdict with its three prep steps](docs/screenshot-verdict.png)
+
+| Coated paper cup → general waste, with the reason | Ambiguous photo → no verdict |
+| --- | --- |
+| ![Coated paper cup routed to general waste](docs/screenshot-paper-cup.png) | ![The app refuses to give a verdict](docs/screenshot-refusal.png) |
 
 ---
 
@@ -23,8 +30,8 @@ upload a photo to somebody's server. Neither survives contact with a kitchen at 
 
 ## What Binwise does
 
-1. **Recognise** — one photo, zero-shot CLIP classification over a catalogue of ~23 common
-   household items, each with several natural-language prompts.
+1. **Recognise** — one photo, zero-shot CLIP classification over a catalogue of 22 common
+   household items, each with several natural-language prompts (82 in total).
 2. **Decide** — the winning item maps to a code in `rules/*.json`, which carries the disposal
    stream, ordered prep steps, and caveats.
 3. **Explain** — the verdict shows the top three candidates with probabilities, the rule file

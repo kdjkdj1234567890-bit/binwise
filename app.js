@@ -10,11 +10,12 @@ const TRANSFORMERS_URL = "https://cdn.jsdelivr.net/npm/@huggingface/transformers
 const MODEL_ID = "Xenova/clip-vit-base-patch32";
 const DEFAULT_RULES = "rules/kr.json";
 
-// CLIP's zero-shot head returns a softmax over the prompt set, so a top score of
-// 0.2–0.5 is normal. The floor sits below that band on purpose: it is meant to
-// catch "the photo is a blurry table corner", not to punish a plausible match.
-const CONFIDENCE_FLOOR = 0.18;  // below this the model is guessing
-const CONFIDENCE_MARGIN = 0.05; // top-2 too close -> ask for another photo
+// An item's score is the summed probability of its prompts, so a real match lands
+// around 0.35–0.60 and a photo of something outside the catalogue stays flat near
+// 0.05–0.15. The floor catches the second case; the margin catches a photo that two
+// catalogue items could each explain.
+const CONFIDENCE_FLOOR = 0.25;  // below this the model is guessing
+const CONFIDENCE_MARGIN = 0.08; // top-2 too close -> ask for another photo
 
 const state = {
   lang: localStorage.getItem("binwise.lang") || "ko",
@@ -36,6 +37,26 @@ const $ = (sel) => document.querySelector(sel);
 /* ------------------------------------------------------------------ */
 
 const KO_ORIGINALS = new Map();
+
+// Strings that are only ever produced by script (not present as data-i18n in the
+// HTML) need their Korean text here, otherwise the key would leak into the UI.
+const KO = {
+  scanning: "사진을 살펴보는 중…",
+  model_loading: "모델을 불러오는 중… {pct}",
+  model_loading_plain: "모델을 불러오는 중…",
+  model_ready: "모델 준비 완료 · {device} · 사진은 이 기기를 벗어나지 않습니다.",
+  model_error: "모델을 불러오지 못했습니다 ({err}). 아래에서 품목을 직접 고를 수 있습니다.",
+  confidence: "확신도 {pct}%",
+  prep_title: "이렇게 준비하세요",
+  notes_title: "주의",
+  candidates_title: "모델이 본 것",
+  applied_rule: "적용 규칙: {file} · 품목: {item}",
+  uncertain_title: "확신도가 낮아 판정을 보류했습니다",
+  uncertain_body: "사진이 모호합니다. 물건 하나가 화면 가운데 오게 다시 찍거나, 아래에서 품목을 직접 골라 주세요.",
+  food_hint: "액체는 따라 버리고 배출하세요.",
+  disclaimer: "지자체 조례에 따라 다를 수 있습니다. 헷갈리면 주민센터에 문의하세요.",
+  rules_loaded: "{n}개 품목 · {date} 갱신",
+};
 
 const EN = {
   tagline: "Sorting assistant",
@@ -77,6 +98,7 @@ const EN = {
   footer_1: "Binwise · MIT License · 2026 Dongjin Kim",
   footer_2: "Photos never leave this browser. Only the model file is fetched from a public CDN, once.",
   scanning: "Looking at the photo…",
+  model_loading_plain: "Loading the model…",
   model_loading: "Loading the model… {pct}%",
   model_ready: "Model ready on {device}. Photos stay on this device.",
   model_error: "Could not load the model ({err}). You can still pick the item manually below.",
@@ -93,7 +115,7 @@ const EN = {
 };
 
 function t(key, vars) {
-  const table = state.lang === "en" ? EN : null;
+  const table = state.lang === "en" ? EN : KO;
   const dict = table || {};
   const fromDict = dict[key];
   let text;
@@ -177,6 +199,19 @@ function renderRulesMeta() {
 /* Model                                                               */
 /* ------------------------------------------------------------------ */
 
+// `"gpu" in navigator` is true in many browsers where no adapter can be created
+// (software rendering, headless, blocked GPU). Asking for an adapter costs little
+// and keeps a dead WebGPU attempt from poisoning the WASM fallback.
+async function probeWebGPU() {
+  try {
+    if (typeof navigator === "undefined" || !("gpu" in navigator)) return false;
+    const adapter = await navigator.gpu.requestAdapter();
+    return Boolean(adapter);
+  } catch {
+    return false;
+  }
+}
+
 function setStatus(kind, text) {
   const dot = document.querySelector("#modelStatus .dot");
   const span = $("#modelStatusText");
@@ -192,7 +227,7 @@ function renderStatus() {
     setStatus("ok", t("model_ready", { device: state.modelDevice }));
     $("#warmButton")?.setAttribute("hidden", "");
   } else if (state.loading) {
-    setStatus("busy", t("model_loading", { pct: "" }).replace("{pct}", "…"));
+    setStatus("busy", t("model_loading_plain"));
   } else {
     setStatus("", t("model_idle"));
   }
@@ -209,8 +244,9 @@ async function loadModel() {
     env.allowLocalModels = false;
     env.useBrowserCache = true;
 
-    const hasWebGPU = typeof navigator !== "undefined" && "gpu" in navigator;
+    const hasWebGPU = await probeWebGPU();
     const attempts = hasWebGPU ? ["webgpu", "wasm"] : ["wasm"];
+    const errors = [];
 
     for (const device of attempts) {
       try {
@@ -221,10 +257,12 @@ async function loadModel() {
         state.modelDevice = device;
         break;
       } catch (err) {
-        if (device === attempts[attempts.length - 1]) throw err;
-        console.warn(`Binwise: ${device} failed, falling back to wasm`, err);
+        errors.push(`${device}: ${err?.message || err}`);
+        state.classifier = null;
+        console.warn(`Binwise: ${device} failed`, err);
       }
     }
+    if (!state.classifier) throw new Error(errors.join(" / "));
   } catch (err) {
     state.classifier = null;
     state.modelError = err?.message || String(err);
@@ -253,22 +291,25 @@ async function classifyImage(url) {
   const labels = labelMap.map((entry) => entry.label);
   const raw = await state.classifier(url, labels);
 
-  // Keep the best prompt per item, then rank the items.
-  const best = new Map();
+  // Aggregate to an item posterior: an item's score is the probability mass of all
+  // of its prompts. Taking the single best prompt instead would penalise the items
+  // that describe themselves in more ways and reward the terse ones.
+  const totals = new Map();
   for (const row of raw) {
     const mapped = labelMap.find((m) => m.label === row.label);
     if (!mapped) continue;
-    const current = best.get(mapped.itemId);
-    if (!current || row.score > current.score) {
-      best.set(mapped.itemId, { itemId: mapped.itemId, score: row.score, label: row.label });
+    const current = totals.get(mapped.itemId) || { itemId: mapped.itemId, prob: 0, best: 0, label: row.label };
+    current.prob += row.score;
+    if (row.score > current.best) {
+      current.best = row.score;
+      current.label = row.label;
     }
+    totals.set(mapped.itemId, current);
   }
-  const ranked = [...best.values()].sort((a, b) => b.score - a.score);
+  const ranked = [...totals.values()].sort((a, b) => b.prob - a.prob);
 
-  // Keep the model's own probability instead of re-normalising: it is the number
-  // the confidence gate and the reader should both see, without invented inflation.
-  for (const r of ranked) r.prob = r.score;
-
+  // The sum is the probability the image matches that item at all, which is what the
+  // gate and the reader both need; it is not re-normalised again on top.
   return ranked;
 }
 
@@ -418,14 +459,18 @@ function verdictNode(item, ranked) {
 function setPreview(url) {
   const wrap = $("#previewWrap");
   const img = $("#preview");
+  const drop = $("#dropZone");
   if (!wrap || !img) return;
   if (!url) {
     wrap.setAttribute("hidden", "");
     img.removeAttribute("src");
+    drop?.removeAttribute("hidden");
     return;
   }
   img.src = url;
   wrap.removeAttribute("hidden");
+  // The photo replaces the empty drop target instead of stacking under it.
+  drop?.setAttribute("hidden", "");
 }
 
 async function handleFile(file) {
