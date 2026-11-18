@@ -10,8 +10,11 @@ const TRANSFORMERS_URL = "https://cdn.jsdelivr.net/npm/@huggingface/transformers
 const MODEL_ID = "Xenova/clip-vit-base-patch32";
 const DEFAULT_RULES = "rules/kr.json";
 
-const CONFIDENCE_FLOOR = 0.3;   // below this the model is guessing
-const CONFIDENCE_MARGIN = 0.06; // top-2 too close -> ask for another photo
+// CLIP's zero-shot head returns a softmax over the prompt set, so a top score of
+// 0.2–0.5 is normal. The floor sits below that band on purpose: it is meant to
+// catch "the photo is a blurry table corner", not to punish a plausible match.
+const CONFIDENCE_FLOOR = 0.18;  // below this the model is guessing
+const CONFIDENCE_MARGIN = 0.05; // top-2 too close -> ask for another photo
 
 const state = {
   lang: localStorage.getItem("binwise.lang") || "ko",
@@ -262,9 +265,9 @@ async function classifyImage(url) {
   }
   const ranked = [...best.values()].sort((a, b) => b.score - a.score);
 
-  // Softmax over the item-level scores so the display sums sensibly.
-  const total = ranked.reduce((sum, r) => sum + Math.exp(r.score * 12), 0);
-  for (const r of ranked) r.prob = Math.exp(r.score * 12) / total;
+  // Keep the model's own probability instead of re-normalising: it is the number
+  // the confidence gate and the reader should both see, without invented inflation.
+  for (const r of ranked) r.prob = r.score;
 
   return ranked;
 }
@@ -351,7 +354,7 @@ function candidateList(ranked) {
         <div style="display:flex;justify-content:space-between;gap:.5rem">
           <span>${item ? L(item.name) : row.label}</span>
         </div>
-        <div class="bar"><span style="width:${Math.min(100, pct * 2)}%"></span></div>
+        <div class="bar"><span style="width:${Math.max(3, Math.min(100, pct * 2.5))}%"></span></div>
       </div>
       <span class="pct">${pct}%</span>
     `;
